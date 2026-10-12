@@ -1,0 +1,41 @@
+name: F11C Windows EXE
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'windows_app/**'
+      - '.github/workflows/f11-windows.yml'
+permissions:
+  contents: read
+concurrency:
+  group: f11-windows-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  exe:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: windows_app/requirements.txt
+      - name: Install dependencies
+        run: python -m pip install -r windows_app/requirements.txt
+      - name: Static check
+        run: python -m py_compile windows_app/rotator_ble.py
+      - name: Build standalone EXE
+        working-directory: windows_app
+        run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name RotatorBLE --collect-all bleak rotator_ble.py
+      - name: Verify EXE
+        shell: pwsh
+        run: |
+          if (!(Test-Path windows_app/dist/RotatorBLE.exe)) { throw 'EXE missing' }
+          if ((Get-Item windows_app/dist/RotatorBLE.exe).Length -lt 100000) { throw 'EXE suspiciously small' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RotatorBLE-Windows-EXE
+          path: windows_app/dist/RotatorBLE.exe
+          if-no-files-found: error
+          retention-days: 14
