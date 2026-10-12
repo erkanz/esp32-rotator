@@ -69,8 +69,7 @@ class App:
   self.choice=ttk.Combobox(frame,state="readonly",width=48);self.choice.pack(fill="x",pady=8)
   bar=ttk.Frame(frame);bar.pack()
   ttk.Button(bar,text="Scan",command=lambda:self.call(self.scan())).pack(side="left")
-  ttk.Button(bar,text="Connect (read-only)",command=lambda:self.call(self.connect(self.choice.current()))).pack(side="left")
-  ttk.Button(bar,text="Pair / Authenticate",command=lambda:self.call(self.pair_connection())).pack(side="left")
+  ttk.Button(bar,text="Connect",command=lambda:self.call(self.connect(self.choice.current()))).pack(side="left")
   ttk.Button(bar,text="Disconnect",command=lambda:self.call(self.disconnect())).pack(side="left")
   self.status=tk.StringVar(value="Disconnected");ttk.Label(frame,textvariable=self.status,wraplength=490).pack(pady=10)
   self.az=self.field(frame,"Target AZ 0–359","90")
@@ -87,7 +86,7 @@ class App:
    inp=self.field(frame,f"{key}: {low}–{high}",str(default))
    ttk.Button(frame,text="Set "+key,command=lambda k=key,i=inp,lo=low,hi=high:self.set_value(k,i,lo,hi)).pack()
   ttk.Button(frame,text="Clear fault",command=lambda:self.command("CLEAR")).pack()
-  self.notice=tk.StringVar(value="Pair BLE device via Windows if requested. Open Logs for diagnostics.")
+  self.notice=tk.StringVar(value="Select a device and click Connect; Windows pairing is automatic.")
   ttk.Label(frame,textvariable=self.notice,wraplength=590).pack(pady=8)
   ttk.Button(frame,text="Open Logs",command=lambda:tabs.select(logs)).pack()
   self.build_log_tab(logs)
@@ -217,89 +216,67 @@ class App:
    self.scanning=False
  async def connect(self,index):
   if self.connecting:
-   self.logger.warning("Duplicate Connect ignored: BLE connection/discovery already running")
-   self.set_log("Connection still in progress; wait for the log result.")
+   self.logger.warning("Duplicate Connect ignored: BLE connection already in progress")
+   self.set_log("Connection in progress. Wait for the result.")
    return
   if index<0 or index>=len(self.devices):raise ValueError("Scan and select a BLE device")
   self.connecting=True
   device=self.devices[index]
-  self.logger.info("BLE connect requested: name=%r address=%s",device.name,device.address)
+  self.logger.info("Connect requested: name=%r address=%s (automatic secure pairing)",device.name,device.address)
+  self.set_log("Connecting and pairing automatically. Approve Windows Bluetooth prompt if shown.")
   try:
    await self.disconnect(force=True)
    self.connection_generation+=1
    generation=self.connection_generation
-   self.last_status=None;self.paired=False
-   for attempt,use_cache in enumerate((False,True),start=1):
-    if attempt>1:
-     self.logger.warning("Uncached GATT discovery failed; retrying with Windows cached services")
+   self.last_status=None
+   self.paired=False
+   # A fresh discovery can fail on some WinRT adapters. Cache fallback is
+   # sequential, after disconnecting and releasing the previous client.
+   for attempt,use_cache in enumerate((True,False),start=1):
+    if attempt==2:
+     self.logger.warning("First GATT attempt failed. Trying uncached service discovery once.")
      await asyncio.sleep(1.0)
-    self.logger.info("WinRT connect attempt %d/2: pair=False, use_cached_services=%s",attempt,use_cache)
-    client=BleakClient(device,pair=False,timeout=25.0,
+    self.logger.info("WinRT connect attempt %d/2: auto_pair=True, use_cached_services=%s",attempt,use_cache)
+    client=BleakClient(device,pair=True,timeout=30.0,
      disconnected_callback=lambda cl,g=generation:self.on_disconnect(cl,g),
      winrt={"use_cached_services":use_cache})
     self.client=client
     try:
      await client.connect()
-     self.logger.info("GATT connected; services discovered: %s",",".join(str(x.uuid) for x in client.services))
+     self.logger.info("Auto-pair/connect completed; connected=%s",client.is_connected)
+     if not client.is_connected:raise RuntimeError("Device disconnected while connecting or pairing")
+     self.logger.info("Discovered GATT UUIDs: %s",",".join(str(x.uuid) for x in client.services))
      if client.services.get_service(SERVICE) is None:
-      raise RuntimeError("R5.12 control service missing from GATT discovery")
-     self.logger.info("R5.12 service found; waiting 1.5 s before initial read")
-     self.set_log("GATT found. Checking connection stability before pairing...")
-     await asyncio.sleep(1.5)
-     if not client.is_connected:raise RuntimeError("Device disconnected before first status read")
+      raise RuntimeError("R5.12 control service not found")
+     self.logger.info("R5.12 GATT control service found. Checking first STATUS read.")
      async with self.gatt_lock:blob=await client.read_gatt_char(STATUS)
-     payload=blob.decode(errors="replace")
-     self.logger.info("Initial unpaired STATUS OK (%d bytes): %s",len(blob),payload[:220])
-     self.last_status=json.loads(payload)
-     self.logger.info("Read-only BLE session established (cache=%s)",use_cache)
-     self.set_log("Read-only link stable. Pair / Authenticate is now available.")
+     obj=json.loads(blob.decode())
+     if not client.is_connected:raise RuntimeError("BLE disconnected after the first GATT read")
+     self.last_status=obj
+     self.paired=True
+     self.logger.info("BLE session authenticated and ready: role=%s az=%s online=%s",obj.get("role"),obj.get("az"),obj.get("online"))
+     self.set_log("Connected and paired. Motor controls enabled.")
+     self.ui(lambda d=obj:self.status.set(f"DEVICE {d.get('role')} | LINK {d.get('online')}\nAZ {d.get('az')}° / TARGET {d.get('target')}°"))
      self.call(self.poll(client,generation))
      return
     except Exception as err:
-     self.logger.warning("GATT attempt %d failed: %s: %s",attempt,type(err).__name__,err,exc_info=True)
+     self.paired=False
+     self.logger.warning("Auto-connect/pair attempt %d failed: %s: %s",attempt,type(err).__name__,err,exc_info=True)
      try:
       if client.is_connected:await client.disconnect()
-     except Exception as cleanup_err:self.logger.warning("GATT cleanup: %s",cleanup_err)
+     except Exception as cleanup_err:self.logger.warning("BLE cleanup failed: %s",cleanup_err)
      if self.client is client:self.client=None
-     if attempt==2 or not ("Unreachable" in str(err) or "GATT" in str(err)):
+     if attempt==2 or not ("Unreachable" in str(err) or "GATT" in str(err) or "service" in str(err).lower()):
       raise
-   raise RuntimeError("GATT service discovery failed in both modes")
+   raise RuntimeError("Automatic BLE connection/pairing failed")
   finally:
    self.connecting=False
- async def pair_connection(self):
-  if self.connecting:
-   self.logger.warning("Pair ignored while Connect is still running")
-   self.set_log("Wait until Connect completes before pairing")
-   return
-  client=self.client
-  if not client or not client.is_connected:
-   self.logger.warning("Cannot pair: device disconnected. Scan/Connect first.")
-   self.set_log("Connect to a ROTATOR BLE device first")
-   return
-  if self.paired:
-   self.logger.info("Pair button pressed while this session is already authenticated")
-   self.set_log("Already paired for this session.")
-   return
-  self.logger.info("Starting Windows BLE secure pairing (MITM protected). Await Windows PIN dialog.")
-  self.set_log("Pairing: confirm the Windows Bluetooth PIN request...")
-  try:
-   result=await client.pair()
-   self.logger.info("Windows pairing API completed (result=%r, connected=%s)",result,client.is_connected)
-   if not client.is_connected:raise RuntimeError("BLE link dropped during pairing")
-   async with self.gatt_lock:blob=await client.read_gatt_char(STATUS)
-   self.logger.info("Post-pair GATT status read OK (%d bytes)",len(blob))
-   self.paired=True
-   self.set_log("Secure pairing completed. Motor controls enabled.")
-  except Exception as ex:
-   self.paired=False
-   self.logger.log(FAIL,"Windows BLE secure pairing failed: %s",ex,exc_info=True)
-   self.set_log("Pairing failed / disconnected. See Logs tab.")
  def on_disconnect(self,client,generation):
   if generation!=self.connection_generation or (self.client is not None and client is not self.client):return
   self.paired=False
   self.jog=0
   self.jog_token+=1
-  self.logger.warning("BLE disconnected unexpectedly: %s. Read-only=%s",client.address,"yes")
+  self.logger.warning("BLE disconnected unexpectedly: %s. Paired session invalidated.",client.address)
   self.set_log("BLE disconnected. See Logs tab.")
  async def disconnect(self,force=False):
   if self.connecting and not force:
@@ -313,7 +290,8 @@ class App:
   if self.client:
    self.logger.info("BLE disconnect request: %s",self.client.address)
    if self.client.is_connected:
-    try:await self.client.write_gatt_char(CMD,b"JOG 0",response=True)
+    try:
+     if self.paired:await self.client.write_gatt_char(CMD,b"JOG 0",response=True)
     except Exception:pass
     await self.client.disconnect()
    self.client=None
@@ -323,7 +301,7 @@ class App:
    raise RuntimeError("Not connected")
   if not self.paired:
    self.logger.warning("GATT write blocked: pairing required (%s)",s)
-   self.set_log("Pair / Authenticate before controlling the motor.")
+   self.set_log("Not connected/paired. Click Connect first.")
    return
   if not s.isascii() or len(s)>80:raise ValueError("Invalid command")
   repeated=s.startswith("JOG ") and s!="JOG 0"
