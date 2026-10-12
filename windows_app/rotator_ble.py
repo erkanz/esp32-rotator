@@ -15,13 +15,13 @@ class App:
  def __init__(self,root):
   self.root=root;root.title("Rotator BLE — REMOTE / ROTATOR");root.geometry("560x600")
   self.loop=asyncio.new_event_loop();threading.Thread(target=self._worker,daemon=True).start()
-  self.devices=[];self.client=None;self.running=True;self.jog=0
+  self.devices=[];self.client=None;self.running=True;self.jog=0;self.scanning=False
   frame=ttk.Frame(root,padding=16);frame.pack(fill="both",expand=True)
   ttk.Label(frame,text="ROTATOR BLE / REMOTE BLE",font=("Segoe UI",16,"bold")).pack()
   self.choice=ttk.Combobox(frame,state="readonly",width=48);self.choice.pack(fill="x",pady=8)
   bar=ttk.Frame(frame);bar.pack()
   ttk.Button(bar,text="Scan",command=lambda:self.call(self.scan())).pack(side="left")
-  ttk.Button(bar,text="Connect",command=lambda:self.call(self.connect())).pack(side="left")
+  ttk.Button(bar,text="Connect",command=lambda:self.call(self.connect(self.choice.current()))).pack(side="left")
   ttk.Button(bar,text="Disconnect",command=lambda:self.call(self.disconnect())).pack(side="left")
   self.status=tk.StringVar(value="Disconnected");ttk.Label(frame,textvariable=self.status,wraplength=490).pack(pady=10)
   self.az=self.field(frame,"Target AZ 0–359","90")
@@ -54,13 +54,41 @@ class App:
  def field(self,frame,label,value):
   ttk.Label(frame,text=label).pack();w=ttk.Entry(frame);w.insert(0,value);w.pack(pady=2);return w
  async def scan(self):
-  found=await BleakScanner.discover(timeout=7.0,return_adv=True)
-  self.devices=[d for d,adv in found.values() if SERVICE in [u.lower() for u in adv.service_uuids] or "ROTATOR" in (adv.local_name or d.name or "").upper()]
-  labels=[(d.name or "Rotator GATT")+"  "+d.address for d in self.devices]
-  self.ui(lambda:(self.choice.configure(values=labels),self.choice.current(0) if labels else None))
-  self.set_log(f"Found {len(labels)} device(s)")
- async def connect(self):
-  index=self.choice.current()
+  if self.scanning:return
+  self.scanning=True
+  self.set_log("Scanning all BLE advertisements for 10 seconds...")
+  try:
+   found=await BleakScanner.discover(timeout=10.0,return_adv=True)
+   candidates=[]
+   for device,adv in found.values():
+    name=(adv.local_name or device.name or "").strip()
+    uuids=[str(u).lower() for u in (adv.service_uuids or [])]
+    match=SERVICE in uuids or "ROTATOR" in name.upper()
+    candidates.append((not match,-int(adv.rssi if adv.rssi is not None else -127),device,name,match))
+   candidates.sort(key=lambda item:(item[0],item[1]))
+   self.devices=[item[2] for item in candidates]
+   labels=[]
+   for _,rssi,device,name,match in candidates:
+    prefix="ROTATOR" if match else "OTHER BLE"
+    labels.append(f"{prefix}: {name or '(unnamed)'} | RSSI {-rssi} dBm | {device.address}")
+   def show():
+    self.choice.configure(values=labels)
+    self.choice.set("")
+    if labels:self.choice.current(0)
+   self.ui(show)
+   matches=sum(item[4] for item in candidates)
+   total=len(candidates)
+   if not total:
+    self.set_log("0 BLE broadcasts found. Check Windows Bluetooth, ESP32 R5.12 firmware and BLE ON setting.")
+   elif not matches:
+    self.set_log(f"{total} BLE devices found, 0 ROTATOR candidates. Other devices are shown for diagnosis; enable BLE on ESP32.")
+   else:
+    self.set_log(f"{total} BLE devices found; {matches} possible ROTATOR devices. Select ROTATOR and Connect.")
+  except Exception as exc:
+   self.set_log(f"Bluetooth scan failed ({type(exc).__name__}): {exc}")
+  finally:
+   self.scanning=False
+ async def connect(self,index):
   if index<0 or index>=len(self.devices):raise ValueError("Scan and select a BLE device")
   await self.disconnect()
   self.client=BleakClient(self.devices[index],pair=True,timeout=30.0)
