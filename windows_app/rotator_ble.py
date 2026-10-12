@@ -61,7 +61,7 @@ class App:
   self.loop=asyncio.new_event_loop();threading.Thread(target=self._worker,daemon=True).start()
   self.devices=[];self.client=None;self.running=True;self.jog=0;self.scanning=False
   self.events=queue.Queue();self.history=deque(maxlen=4000);self.logger,self.logfile=make_logger(self.events)
-  self.gatt_lock=asyncio.Lock();self.jog_token=0;self.last_status=None
+  self.gatt_lock=asyncio.Lock();self.jog_token=0;self.last_status=None;self.paired=False;self.connection_generation=0
   tabs=ttk.Notebook(root);tabs.pack(fill="both",expand=True,padx=8,pady=8)
   frame=ttk.Frame(tabs,padding=16);logs=ttk.Frame(tabs,padding=8)
   tabs.add(frame,text="Control");tabs.add(logs,text="Logs")
@@ -69,7 +69,8 @@ class App:
   self.choice=ttk.Combobox(frame,state="readonly",width=48);self.choice.pack(fill="x",pady=8)
   bar=ttk.Frame(frame);bar.pack()
   ttk.Button(bar,text="Scan",command=lambda:self.call(self.scan())).pack(side="left")
-  ttk.Button(bar,text="Connect",command=lambda:self.call(self.connect(self.choice.current()))).pack(side="left")
+  ttk.Button(bar,text="Connect (read-only)",command=lambda:self.call(self.connect(self.choice.current()))).pack(side="left")
+  ttk.Button(bar,text="Pair / Authenticate",command=lambda:self.call(self.pair_connection())).pack(side="left")
   ttk.Button(bar,text="Disconnect",command=lambda:self.call(self.disconnect())).pack(side="left")
   self.status=tk.StringVar(value="Disconnected");ttk.Label(frame,textvariable=self.status,wraplength=490).pack(pady=10)
   self.az=self.field(frame,"Target AZ 0–359","90")
@@ -217,18 +218,78 @@ class App:
  async def connect(self,index):
   if index<0 or index>=len(self.devices):raise ValueError("Scan and select a BLE device")
   device=self.devices[index]
-  self.logger.info("BLE connection requested: name=%r address=%s",device.name,device.address)
   await self.disconnect()
-  self.client=BleakClient(device,pair=True,timeout=30.0,disconnected_callback=lambda client:self.logger.warning("BLE link disconnected unexpectedly: %s",client.address))
-  await self.client.connect()
-  if self.client.services.get_service(SERVICE) is None:
-   self.logger.log(FAIL,"Device connected but R5.12 control service UUID missing: %s",SERVICE)
-   raise RuntimeError("R5.12 control GATT not found")
-  self.logger.info("BLE connected and control GATT service found: %s",device.address)
-  self.set_log("Secure GATT connected")
-  self.call(self.poll())
+  self.connection_generation+=1
+  generation=self.connection_generation
+  self.last_status=None
+  self.paired=False
+  self.logger.info("BLE read-only connect: name=%r address=%s. Pairing deliberately deferred.",device.name,device.address)
+  self.client=BleakClient(device,pair=False,timeout=30.0,
+   disconnected_callback=lambda client:self.on_disconnect(client,generation))
+  try:
+   await self.client.connect()
+   self.logger.info("GATT connected (pair=False). Checking service and first read...")
+   if self.client.services.get_service(SERVICE) is None:
+    self.logger.log(FAIL,"Device connected but R5.12 control service UUID missing: %s",SERVICE)
+    raise RuntimeError("R5.12 control GATT not found")
+   self.logger.info("R5.12 service discovered. Waiting 1.5 seconds to detect early peripheral disconnect...")
+   self.set_log("GATT found. Checking if the connection stays alive without pairing...")
+   await asyncio.sleep(1.5)
+   if not self.client.is_connected:
+    self.logger.log(FAIL,"Device disconnected before initial status read, without any pairing request.")
+    self.set_log("Early BLE disconnect without pairing. See Logs tab.")
+    return
+   try:
+    async with self.gatt_lock:blob=await self.client.read_gatt_char(STATUS)
+    payload=blob.decode(errors="replace")
+    self.logger.info("First unpaired GATT STATUS read successful (%d bytes): %s",len(blob),payload[:220])
+    self.last_status=json.loads(payload)
+   except Exception as ex:
+    self.logger.error("First status read failed without pairing: %s",ex,exc_info=True)
+    self.set_log("Unpaired GATT read failed. See Logs tab.")
+    return
+   self.set_log("Read-only link stable. Click Pair / Authenticate to enable motor commands.")
+   self.logger.info("Read-only BLE connection successful. Waiting for explicit Pair / Authenticate.")
+   self.call(self.poll())
+  except Exception:
+   self.logger.exception("BLE connect or initial GATT service check failed")
+   raise
+ async def pair_connection(self):
+  client=self.client
+  if not client or not client.is_connected:
+   self.logger.warning("Cannot pair: device disconnected. Scan/Connect first.")
+   self.set_log("Connect to a ROTATOR BLE device first")
+   return
+  if self.paired:
+   self.logger.info("Pair button pressed while this session is already authenticated")
+   self.set_log("Already paired for this session.")
+   return
+  self.logger.info("Starting Windows BLE secure pairing (MITM protected). Await Windows PIN dialog.")
+  self.set_log("Pairing: confirm the Windows Bluetooth PIN request...")
+  try:
+   result=await client.pair()
+   self.logger.info("Windows pairing API completed (result=%r, connected=%s)",result,client.is_connected)
+   if not client.is_connected:raise RuntimeError("BLE link dropped during pairing")
+   async with self.gatt_lock:blob=await client.read_gatt_char(STATUS)
+   self.logger.info("Post-pair GATT status read OK (%d bytes)",len(blob))
+   self.paired=True
+   self.set_log("Secure pairing completed. Motor controls enabled.")
+  except Exception as ex:
+   self.paired=False
+   self.logger.log(FAIL,"Windows BLE secure pairing failed: %s",ex,exc_info=True)
+   self.set_log("Pairing failed / disconnected. See Logs tab.")
+ def on_disconnect(self,client,generation):
+  if generation!=self.connection_generation:return
+  self.paired=False
+  self.jog=0
+  self.jog_token+=1
+  self.logger.warning("BLE disconnected unexpectedly: %s. Read-only=%s",client.address,"yes")
+  self.set_log("BLE disconnected. See Logs tab.")
  async def disconnect(self):
   self.jog=0
+  self.jog_token+=1
+  self.connection_generation+=1
+  self.paired=False
   if self.client:
    self.logger.info("BLE disconnect request: %s",self.client.address)
    if self.client.is_connected:
@@ -240,6 +301,10 @@ class App:
   if not self.client or not self.client.is_connected:
    self.logger.warning("GATT command rejected: not connected (%s)",s)
    raise RuntimeError("Not connected")
+  if not self.paired:
+   self.logger.warning("GATT write blocked: pairing required (%s)",s)
+   self.set_log("Pair / Authenticate before controlling the motor.")
+   return
   if not s.isascii() or len(s)>80:raise ValueError("Invalid command")
   repeated=s.startswith("JOG ") and s!="JOG 0"
   if not repeated:self.logger.info("GATT TX: %s",s)
@@ -292,13 +357,17 @@ class App:
   self.jog_tick(self.jog_token)
  def jog_tick(self,token):
   if not self.jog or token!=self.jog_token:return
+  if not self.paired:
+   self.logger.warning("Manual jog blocked (device has not completed authentication)")
+   self.jog=0
+   return
   self.command("JOG 1" if self.jog>0 else "JOG -1")
   self.root.after(220,lambda t=token:self.jog_tick(t))
  def stop_jog(self):
   if self.jog:
    self.jog=0;self.jog_token+=1
    self.logger.info("Manual jog stopped (JOG 0)")
-   self.command("JOG 0")
+   if self.paired:self.command("JOG 0")
  def close(self):
   self.stop_jog();self.logger.info("Application closing")
   self.call(self.disconnect())
