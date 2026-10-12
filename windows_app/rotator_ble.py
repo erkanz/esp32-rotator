@@ -225,12 +225,14 @@ class App:
   self.paired=False
   self.logger.info("BLE read-only connect: name=%r address=%s. Pairing deliberately deferred.",device.name,device.address)
   self.client=BleakClient(device,pair=False,timeout=30.0,
-   disconnected_callback=lambda client:self.on_disconnect(client,generation))
+   disconnected_callback=lambda client:self.on_disconnect(client,generation),
+   winrt={"use_cached_services":False})
   try:
    await self.client.connect()
-   self.logger.info("GATT connected (pair=False). Checking service and first read...")
+   self.logger.info("GATT connected (pair=False, Windows uncached services). Checking service and first read...")
+   self.logger.info("Discovered GATT services: %s",",".join(str(x.uuid) for x in self.client.services))
    if self.client.services.get_service(SERVICE) is None:
-    self.logger.log(FAIL,"Device connected but R5.12 control service UUID missing: %s",SERVICE)
+    self.logger.log(FAIL,"Device connected but R5.12 service missing from uncached discovery: %s",SERVICE)
     raise RuntimeError("R5.12 control GATT not found")
    self.logger.info("R5.12 service discovered. Waiting 1.5 seconds to detect early peripheral disconnect...")
    self.set_log("GATT found. Checking if the connection stays alive without pairing...")
