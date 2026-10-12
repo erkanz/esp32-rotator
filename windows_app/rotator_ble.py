@@ -285,13 +285,14 @@ class App:
    return
   self.jog=0
   self.jog_token+=1
+  was_paired=self.paired
   self.connection_generation+=1
   self.paired=False
   if self.client:
    self.logger.info("BLE disconnect request: %s",self.client.address)
    if self.client.is_connected:
     try:
-     if self.paired:await self.client.write_gatt_char(CMD,b"JOG 0",response=True)
+     if was_paired:await self.client.write_gatt_char(CMD,b"JOG 0",response=True)
     except Exception:pass
     await self.client.disconnect()
    self.client=None
