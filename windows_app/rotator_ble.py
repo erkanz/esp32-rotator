@@ -62,7 +62,7 @@ class App:
   self.loop=asyncio.new_event_loop();threading.Thread(target=self._worker,daemon=True).start()
   self.devices=[];self.device_names=[];self.client=None;self.running=True;self.jog=0;self.scanning=False
   self.events=queue.Queue();self.history=deque(maxlen=4000);self.logger,self.logfile=make_logger(self.events)
-  self.gatt_lock=asyncio.Lock();self.jog_token=0;self.last_status=None;self.paired=False;self.connection_generation=0;self.connecting=False
+  self.gatt_lock=asyncio.Lock();self.jog_token=0;self.last_status=None;self.paired=False;self.connection_generation=0;self.connecting=False;self.fast_jog=False
   tabs=ttk.Notebook(root);tabs.pack(fill="both",expand=True,padx=8,pady=8)
   frame=ttk.Frame(tabs,padding=16);logs=ttk.Frame(tabs,padding=8)
   tabs.add(frame,text="Control");tabs.add(logs,text="Logs")
@@ -259,6 +259,9 @@ class App:
      self.logger.info("Discovered GATT UUIDs: %s",",".join(str(x.uuid) for x in client.services))
      if client.services.get_service(SERVICE) is None:
       raise RuntimeError("R5.12 control service not found")
+     char=client.services.get_characteristic(CMD)
+     self.fast_jog=bool(char and "write-without-response" in char.properties)
+     self.logger.info("BLE JOG transport: %s", "write-without-response" if self.fast_jog else "write-with-response (legacy firmware)")
      self.logger.info("R5.12 GATT control service found. Checking first STATUS read.")
      async with self.gatt_lock:blob=await client.read_gatt_char(STATUS)
      obj=json.loads(blob.decode())
@@ -316,24 +319,57 @@ class App:
    self.set_log("Not connected/paired. Click Connect first.")
    return
   if not s.isascii() or len(s)>80:raise ValueError("Invalid command")
-  repeated=s.startswith("JOG ") and s!="JOG 0"
-  if not repeated:self.logger.info("GATT TX: %s",s)
+  if s in ("JOG 1","JOG -1"):
+   # Held JOG must run exclusively in jog_worker, never queue independent tasks.
+   raise RuntimeError("JOG heartbeats require jog_worker")
+  self.logger.info("GATT TX: %s",s)
   try:
    async with self.gatt_lock:
     await self.client.write_gatt_char(CMD,s.encode(),response=True)
     reply=await self.client.read_gatt_char(REPLY)
    decoded=reply.decode(errors="replace")
    level=classify_reply(decoded)
-   if not repeated or level>=logging.WARNING:self.logger.log(level,"GATT RX for %s: %s",s,decoded)
+   self.logger.log(level,"GATT RX for %s: %s",s,decoded)
    if level>=logging.WARNING:self.set_log("Device reported warning/error. See Logs tab.")
-   elif not repeated:self.set_log(decoded)
+   else:self.set_log(decoded)
   except Exception as exc:
    self.logger.log(FAIL,"GATT %s failed: %s",s,exc,exc_info=True)
    self.set_log("GATT command failed. See Logs tab.")
  def command(self,s):self.call(self.command_async(s))
+ async def jog_worker(self,token):
+  # Exactly one producer, at most one pending BLE heartbeat. Never read REPLY
+  # or let 220ms UI timers create an unbounded backlog ahead of JOG 0 STOP.
+  client=self.client
+  try:
+   while (self.jog and token==self.jog_token and self.paired and
+          client is self.client and client is not None and client.is_connected):
+    if self.last_status is not None:
+     if self.last_status.get("fault") or not self.last_status.get("online",True):
+      self.logger.warning("JOG canceled: rotor fault/offline in STATUS")
+      self.jog=0;self.jog_token+=1
+      break
+    direction=self.jog
+    async with self.gatt_lock:
+     if (not self.jog or token!=self.jog_token or client is not self.client or not self.paired):
+      break
+     await client.write_gatt_char(CMD,b"JOG 1" if direction>0 else b"JOG -1",
+                                 response=not self.fast_jog)
+    await asyncio.sleep(0.12)
+  except Exception as exc:
+   self.logger.log(FAIL,"Held JOG heartbeat failed: %s",exc,exc_info=True)
+   self.jog=0;self.jog_token+=1
+  finally:
+   # Explicit release is queued by stop_jog. If transport failed, attempt
+   # the fail-safe release exactly once; the firmware deadman also applies.
+   if self.jog==0 and self.paired and client is self.client and client is not None and client.is_connected:
+    # Do not generate duplicates when a normal mouse release already enqueued STOP.
+    pass
  async def poll(self,client,generation):
   last_error=None
   while self.client is client and generation==self.connection_generation and client.is_connected and self.running:
+   if self.jog:
+    await asyncio.sleep(0.25)
+    continue
    try:
     async with self.gatt_lock:blob=await client.read_gatt_char(STATUS)
     obj=json.loads(blob.decode())
@@ -362,17 +398,15 @@ class App:
   self.command(f"{key} {v}")
  def start_jog(self,d):
   if self.jog:return
+  if not self.paired or not self.client or not self.client.is_connected:
+   self.logger.warning("Manual jog blocked: BLE session not authenticated")
+   return
+  if self.last_status is not None and (self.last_status.get("fault") or not self.last_status.get("online",True)):
+   self.logger.warning("Manual jog blocked: rotor has fault or is offline")
+   return
   self.jog=d;self.jog_token+=1
   self.logger.info("Manual jog started: %s","CW" if d>0 else "CCW")
-  self.jog_tick(self.jog_token)
- def jog_tick(self,token):
-  if not self.jog or token!=self.jog_token:return
-  if not self.paired:
-   self.logger.warning("Manual jog blocked (device has not completed authentication)")
-   self.jog=0
-   return
-  self.command("JOG 1" if self.jog>0 else "JOG -1")
-  self.root.after(220,lambda t=token:self.jog_tick(t))
+  self.call(self.jog_worker(self.jog_token))
  def stop_jog(self):
   if self.jog:
    self.jog=0;self.jog_token+=1
