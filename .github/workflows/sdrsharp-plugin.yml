@@ -1,0 +1,50 @@
+name: SDRSharp SNR Plugin DLL
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "plugins/sdrsharp/**"
+      - "sdr_scan/SDRSharpSnrBridge.cs"
+      - ".github/workflows/sdrsharp-plugin.yml"
+permissions:
+  contents: read
+concurrency:
+  group: sdrsharp-plugin-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  sdrsharp:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+      - name: Download official Airspy SDRSharp plugin SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri 'https://airspy.com/?ddownload=5944' -OutFile "$env:RUNNER_TEMP/sdrsharp-sdk.zip" -MaximumRedirection 5
+          Expand-Archive -Path "$env:RUNNER_TEMP/sdrsharp-sdk.zip" -DestinationPath "$env:RUNNER_TEMP/sdrsharp-sdk" -Force
+          $dll = Get-ChildItem "$env:RUNNER_TEMP/sdrsharp-sdk" -Filter SDRSharp.Common.dll -Recurse -File | Select-Object -First 1
+          if (!$dll) { throw 'Official SDK did not contain SDRSharp.Common.dll' }
+          "SDRSHARP_SDK=$($dll.DirectoryName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Official SDRSharp.Common.dll found: $($dll.DirectoryName)"
+      - name: Build SDRSharp SNR bridge DLL
+        shell: pwsh
+        run: |
+          dotnet build plugins/sdrsharp/RotatorSNR.csproj -c Release --no-restore -p:SdrSharpSdk="$env:SDRSHARP_SDK"
+      - name: Verify DLL
+        shell: pwsh
+        run: |
+          $dll='plugins/sdrsharp/bin/Release/net9.0-windows/Zenlabworks.RotatorSNR.SDRSharp.dll'
+          if (!(Test-Path $dll)) { throw 'SDRSharp plugin DLL missing' }
+          Get-Item $dll | Select-Object Name,Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SDRSharp-RotatorSNR-Plugin-DLL
+          path: plugins/sdrsharp/bin/Release/net9.0-windows/Zenlabworks.RotatorSNR.SDRSharp.dll
+          if-no-files-found: error
+          retention-days: 14
