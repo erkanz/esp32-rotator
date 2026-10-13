@@ -13,6 +13,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext
 from bleak import BleakClient, BleakScanner
 from pin_pairing import ensure_authenticated_bond, default_pin, valid_pin
+from sdr_panel import SDRPanel
 
 SERVICE="df8268c0-4cc2-4eaa-85dd-3a6159fe0001"
 CMD="df8268c0-4cc2-4eaa-85dd-3a6159fe0002"
@@ -58,11 +59,11 @@ def make_logger(events):
 
 class App:
  def __init__(self,root):
-  self.root=root;root.title("Rotator BLE — REMOTE / ROTATOR");root.geometry("560x600")
+  self.root=root;root.title("Rotator Control — BLE + SDR# / SDR++");root.geometry("720x740")
   self.loop=asyncio.new_event_loop();threading.Thread(target=self._worker,daemon=True).start()
   self.devices=[];self.device_names=[];self.client=None;self.running=True;self.jog=0;self.scanning=False
   self.events=queue.Queue();self.history=deque(maxlen=4000);self.logger,self.logfile=make_logger(self.events)
-  self.gatt_lock=asyncio.Lock();self.jog_token=0;self.last_status=None;self.paired=False;self.connection_generation=0;self.connecting=False;self.fast_jog=False
+  self.gatt_lock=asyncio.Lock();self.jog_token=0;self.last_status=None;self.paired=False;self.connection_generation=0;self.connecting=False;self.fast_jog=False;self.scan_active=False
   tabs=ttk.Notebook(root);tabs.pack(fill="both",expand=True,padx=8,pady=8)
   frame=ttk.Frame(tabs,padding=16);logs=ttk.Frame(tabs,padding=8)
   tabs.add(frame,text="Control");tabs.add(logs,text="Logs")
@@ -79,7 +80,7 @@ class App:
   self.status=tk.StringVar(value="Disconnected");ttk.Label(frame,textvariable=self.status,wraplength=490).pack(pady=10)
   self.az=self.field(frame,"Target AZ 0–359","90")
   bar=ttk.Frame(frame);bar.pack(pady=4)
-  for label,cmd in (("GO",self.go),("STOP",lambda:self.command("STOP")),("HOME",lambda:self.command("HOME"))):
+  for label,cmd in (("GO",self.go),("STOP",lambda:self.sdr.cancel() if self.scan_active else self.command("STOP")),("HOME",lambda:self.command("HOME"))):
    ttk.Button(bar,text=label,command=cmd).pack(side="left")
   bar=ttk.Frame(frame);bar.pack(pady=5)
   for label,direction in (("◀ CCW",-1),("CW ▶",1)):
@@ -95,6 +96,7 @@ class App:
   ttk.Label(frame,textvariable=self.notice,wraplength=590).pack(pady=8)
   ttk.Button(frame,text="Open Logs",command=lambda:tabs.select(logs)).pack()
   self.build_log_tab(logs)
+  self.sdr=SDRPanel(self,tabs)
   root.bind("<FocusOut>",lambda e:self.stop_jog());root.protocol("WM_DELETE_WINDOW",self.close)
   root.report_callback_exception=self.tk_error
   root.after(120,self.drain_logs)
@@ -224,6 +226,7 @@ class App:
   finally:
    self.scanning=False
  async def connect(self,index,pin):
+  if self.scan_active:raise RuntimeError("Stop SDR scan before changing BLE connection")
   if self.connecting:
    self.logger.warning("Duplicate Connect ignored: BLE connection already in progress")
    self.set_log("Connection in progress. Wait for the result.")
@@ -304,6 +307,14 @@ class App:
   self.logger.warning("BLE disconnected unexpectedly: %s. Paired session invalidated.",client.address)
   self.set_log("BLE disconnected. See Logs tab.")
  async def disconnect(self,force=False):
+  if self.scan_active and not force:
+   self.logger.warning("BLE disconnect blocked during SDR scan; press STOP SCAN first")
+   self.set_log("Stop the SDR scan before disconnecting BLE")
+   return
+  if self.scan_active and force and self.client and self.client.is_connected and self.paired:
+   try:
+    async with self.gatt_lock:await self.client.write_gatt_char(CMD,b"STOP",response=True)
+   except Exception as exc:self.logger.warning("Pre-disconnect emergency STOP failed: %s",exc)
   if self.connecting and not force:
    self.logger.warning("Disconnect ignored while Connect is pending")
    self.set_log("Wait until Connect completes, then Disconnect")
@@ -330,6 +341,10 @@ class App:
    self.set_log("Not connected/paired. Click Connect first.")
    return
   if not s.isascii() or len(s)>80:raise ValueError("Invalid command")
+  if self.scan_active and s!="STOP":
+   self.logger.warning("Manual %s blocked while automatic SDR scan is active",s)
+   self.set_log("SDR scan active; use STOP SCAN first")
+   return
   if s in ("JOG 1","JOG -1"):
    # Held JOG must run exclusively in jog_worker, never queue independent tasks.
    raise RuntimeError("JOG heartbeats require jog_worker")
@@ -408,6 +423,9 @@ class App:
   except (ValueError,AssertionError):return messagebox.showerror(key,f"Enter {lo}–{hi}")
   self.command(f"{key} {v}")
  def start_jog(self,d):
+  if self.scan_active:
+   self.logger.warning("Manual JOG blocked while automatic SDR scan is active")
+   return
   if self.jog:return
   if not self.paired or not self.client or not self.client.is_connected:
    self.logger.warning("Manual jog blocked: BLE session not authenticated")
@@ -424,8 +442,9 @@ class App:
    self.logger.info("Manual jog stopped (JOG 0)")
    if self.paired:self.command("JOG 0")
  def close(self):
+  self.sdr.close()
   self.stop_jog();self.logger.info("Application closing")
-  self.call(self.disconnect())
+  self.call(self.disconnect(force=True))
   self.root.after(450,self.finish_close)
  def finish_close(self):
   self.running=False;self.root.destroy()
