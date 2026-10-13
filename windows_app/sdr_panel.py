@@ -25,6 +25,7 @@ from rotator_scan import (
 LOG = logging.getLogger("rotatorble.sdr")
 SDRSHARP = "SDR# (VisualSNR UDP)"
 SDRPP = "SDR++ (IQ TCP)"
+SDRPP_UDP = "SDR++ (SNR Plugin UDP)"
 
 
 def parse_sweep(start, end, step, settle, dwell, timeout, threshold, port,
@@ -156,7 +157,7 @@ class SDRPanel:
         ttk.Label(line,text="Source").pack(side="left")
         self.mode = tk.StringVar(value=SDRSHARP)
         self.mode_box = ttk.Combobox(line, state="readonly", textvariable=self.mode,
-                                    values=(SDRSHARP,SDRPP), width=23)
+                                    values=(SDRSHARP,SDRPP_UDP,SDRPP), width=27)
         self.mode_box.pack(side="left",padx=6)
         self.mode_box.bind("<<ComboboxSelected>>",self._mode_changed)
         ttk.Label(line,text="Port").pack(side="left")
@@ -222,7 +223,7 @@ class SDRPanel:
             self.mode.set(self.connected_mode)
             messagebox.showinfo("SDR", "Disconnect the SDR before changing source")
             return
-        self.port.set("47291" if self.mode.get()==SDRSHARP else "1234")
+        self.port.set("1234" if self.mode.get()==SDRPP else "47291")
 
     def browse(self):
         selected=filedialog.asksaveasfilename(title="SNR CSV file",defaultextension=".csv",
@@ -248,14 +249,16 @@ class SDRPanel:
         self.app.call(self._connect(mode,port,rate,bw))
 
     async def _connect(self,mode,port,rate,bw):
-        candidate=SDRSharpUDPSource(port) if mode==SDRSHARP else IQTcpSource("127.0.0.1",port,rate,bw)
+        candidate=SDRSharpUDPSource(port) if mode in (SDRSHARP,SDRPP_UDP) else IQTcpSource("127.0.0.1",port,rate,bw)
         try:
             await candidate.start()
             self.source=candidate
             self.connected_mode=mode
             self.app.logger.info("SDR source opened: %s localhost port %d",mode,port)
             msg=("Listening for SDR# VisualSNR UDP packets. Start SDR# with the plugin."
-                 if mode==SDRSHARP else "SDR++ IQ stream opened; checking samples...")
+                 if mode==SDRSHARP else
+                 "Listening for SDR++ Rotator SNR plugin UDP packets."
+                 if mode==SDRPP_UDP else "SDR++ IQ stream opened; checking samples...")
             self.app.ui(lambda:self.info.set(msg))
         except Exception as exc:
             self.app.logger.error("SDR connect failed: %s",exc,exc_info=True)
@@ -287,7 +290,9 @@ class SDRPanel:
         elif source.error:
             message="SDR stream error: "+str(source.error)
         elif source.latest is None:
-            message="Waiting for live SDR# VisualSNR frames..." if self.connected_mode==SDRSHARP else "Waiting for IQ stream..."
+            message=("Waiting for live SDR# VisualSNR frames..." if self.connected_mode==SDRSHARP
+                     else "Waiting for SDR++ SNR plugin UDP frames..." if self.connected_mode==SDRPP_UDP
+                     else "Waiting for IQ stream...")
         else:
             sample=source.latest
             age=time.monotonic()-sample.received
