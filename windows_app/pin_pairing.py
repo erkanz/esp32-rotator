@@ -43,7 +43,7 @@ def respond_to_pairing_event(args, pin, logger):
     return False
 
 
-async def ensure_authenticated_bond(device, pin, logger):
+async def ensure_authenticated_bond(device, pin, logger, force=False):
     """Require Windows-reported ENCRYPTION_AND_AUTHENTICATION before motor control."""
     if not valid_pin(pin):
         raise ValueError("Enter a six-digit BLE pairing PIN")
@@ -58,7 +58,7 @@ async def ensure_authenticated_bond(device, pin, logger):
         info = await DeviceInformation.create_from_id_async(device_id)
         required = REQUIRED_LEVEL
 
-        if info.pairing.is_paired and info.pairing.protection_level == required:
+        if not force and info.pairing.is_paired and info.pairing.protection_level == required:
             logger.info("Windows bond already uses authenticated encryption")
             return
 
