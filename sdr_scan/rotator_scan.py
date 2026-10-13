@@ -322,7 +322,7 @@ async def measure(source, seconds: float, min_samples=3) -> tuple[float, float, 
 
 async def perform_scan(rotor, source, azimuths: list[int], *,
                        settle: float, dwell: float, timeout: float,
-                       output: Path, min_db: float):
+                       output: Path, min_db: float, progress=None):
     if dwell < .4 or settle < 0 or timeout < 1:
         raise ValueError("Dwell >=0.4s, settle >=0s, timeout >=1s required")
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -339,6 +339,7 @@ async def perform_scan(rotor, source, azimuths: list[int], *,
             writer.writerow(["utc_start", "az", "median_snr_db", "spread_db", "samples", "freq_hz"])
             for i, az in enumerate(azimuths, 1):
                 LOG.info("[%d/%d] Moving to AZ %d", i, len(azimuths), az)
+                if progress: progress("moving", az, None, i, len(azimuths))
                 await rotor.move_to(az, timeout=timeout)
                 await asyncio.sleep(settle)
                 snr, stdev, samples, freq = await measure(source, dwell)
@@ -347,12 +348,14 @@ async def perform_scan(rotor, source, azimuths: list[int], *,
                 writer.writerow([started, az, f"{snr:.3f}", f"{stdev:.3f}", samples, freq or ""])
                 fh.flush()
                 LOG.info("AZ %3d -> relative SNR %6.2f dB (%d samples)", az, snr, samples)
+                if progress: progress("sample", az, row, i, len(azimuths))
         best = max(rows, key=lambda v: v.median_db)
         if best.median_db < min_db:
             raise RuntimeError(f"No trustworthy peak: best {best.median_db:.1f} dB < {min_db:.1f} dB")
         if any(row.frequency_hz is not None and row.frequency_hz != best.frequency_hz for row in rows):
             raise RuntimeError("SDR frequency changed during sweep; samples incomparable")
         LOG.info("Best AZ=%d, relative SNR=%.2f dB", best.az, best.median_db)
+        if progress: progress("best", best.az, best, len(azimuths), len(azimuths))
         await rotor.move_to(best.az, timeout=timeout)
         completed = True
         return best, rows
