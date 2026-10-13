@@ -8,9 +8,14 @@ from datetime import datetime
 import json
 import logging
 from pathlib import Path
+import sys
 import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+
+# Source checkout: find the existing SDR scanner library next to windows_app.
+if not getattr(sys, "frozen", False):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "sdr_scan"))
 
 from rotator_scan import (
     SDRSharpUDPSource, IQTcpSource, angles, circular_distance, perform_scan,
