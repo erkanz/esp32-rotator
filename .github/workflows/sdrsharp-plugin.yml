@@ -35,7 +35,7 @@ jobs:
       - name: Build SDRSharp SNR bridge DLL
         shell: pwsh
         run: |
-          dotnet build plugins/sdrsharp/RotatorSNR.csproj -c Release --no-restore -p:SdrSharpSdk="$env:SDRSHARP_SDK"
+          dotnet build plugins/sdrsharp/RotatorSNR.csproj -c Release -p:SdrSharpSdk="$env:SDRSHARP_SDK"
       - name: Verify DLL
         shell: pwsh
         run: |
