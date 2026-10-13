@@ -38,7 +38,8 @@ getir. Sinyal tarama boyunca aynı frekansta ve kesintisiz olmalıdır.
 
 ## RotatorControl.exe
 
-`SDR# / SNR Scan` sekmesinde **SDR# (VisualSNR UDP)** seç, port `47291`,
+`SDR# / SNR Scan` sekmesinde SDR# için **SDR# (VisualSNR UDP)** veya
+SDR++ native eklentisi için **SDR++ (SNR Plugin UDP)** seç, port `47291`,
 **Connect SDR** tıkla. **SDR ACTIVE** ve taze SNR/frekans gelmeden
 otomatik anten taramasını başlatma. Her iki plugin aynı UDP formatını
 kullanır: `snr_db`, `frequency_hz`, `playing`.
