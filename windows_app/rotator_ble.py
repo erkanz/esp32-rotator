@@ -287,10 +287,11 @@ class App:
       if client.is_connected:await client.disconnect()
      except Exception as cleanup_err:self.logger.warning("BLE cleanup failed: %s",cleanup_err)
      if self.client is client:self.client=None
-     if attempt==1 and ("Unreachable" in str(err) or "GATT" in str(err) or "service" in str(err).lower()):
+     retryable=any(x in str(err).lower() for x in ("unreachable","gatt","service","access denied","authentication","insufficient","security"))
+     if attempt==1 and retryable:
       self.logger.warning("Secure GATT validation failed; attempting a single fresh PIN re-pair")
       await ensure_authenticated_bond(device,pin,self.logger,force=True)
-     if attempt==2 or not ("Unreachable" in str(err) or "GATT" in str(err) or "service" in str(err).lower()):
+     if attempt==2 or not retryable:
       raise
    raise RuntimeError("Automatic BLE connection/pairing failed")
   finally:
