@@ -1,7 +1,7 @@
 import logging
 import unittest
 from unittest.mock import Mock
-from winrt.windows.devices.enumeration import DevicePairingKinds, DevicePairingProtectionLevel
+from winrt.windows.devices.enumeration import DevicePairingKinds, DevicePairingProtectionLevel, DevicePairingRequestedEventArgs
 from pin_pairing import respond_to_pairing_event, SUPPORTED_KINDS, REQUIRED_LEVEL, default_pin, valid_pin
 
 class TestPairingHandler(unittest.TestCase):
@@ -11,12 +11,14 @@ class TestPairingHandler(unittest.TestCase):
     def test_pin(self):
         args = Mock(pairing_kind=DevicePairingKinds.PROVIDE_PIN)
         self.assertTrue(respond_to_pairing_event(args, "639272", self.log))
-        args.accept.assert_called_once_with("639272")
+        args.accept_with_pin.assert_called_once_with("639272")
+        args.accept.assert_not_called()
 
     def test_confirm(self):
         args = Mock(pairing_kind=DevicePairingKinds.CONFIRM_ONLY)
         self.assertTrue(respond_to_pairing_event(args, "639272", self.log))
         args.accept.assert_called_once_with()
+        args.accept_with_pin.assert_not_called()
         self.assertEqual(REQUIRED_LEVEL, DevicePairingProtectionLevel.ENCRYPTION_AND_AUTHENTICATION)
 
     def test_unsupported_kinds(self):
@@ -24,6 +26,11 @@ class TestPairingHandler(unittest.TestCase):
             args = Mock(pairing_kind=kind)
             self.assertFalse(respond_to_pairing_event(args, "639272", self.log))
             args.accept.assert_not_called()
+
+    def test_real_windows_projection_method(self):
+        # GitHub Actions runs this on Windows with the actual PyWinRT 3.2.1.
+        # Mock-only tests previously missed the nonexistent accept(pin) overload.
+        self.assertTrue(hasattr(DevicePairingRequestedEventArgs, "accept_with_pin"))
 
     def test_flags_and_pins(self):
         self.assertTrue(SUPPORTED_KINDS & DevicePairingKinds.PROVIDE_PIN)
