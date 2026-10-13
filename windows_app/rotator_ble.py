@@ -265,6 +265,13 @@ class App:
      self.logger.info("R5.12 GATT control service found. Checking first STATUS read.")
      async with self.gatt_lock:blob=await client.read_gatt_char(STATUS)
      obj=json.loads(blob.decode())
+     # Public STATUS read alone does not verify BLE MITM. STATUS command
+     # is side-effect-free on both endpoints; its GATT WRITE needs MITM.
+     self.logger.info("Verifying authenticated GATT COMMAND with nonmoving STATUS probe")
+     async with self.gatt_lock:
+      await client.write_gatt_char(CMD,b"STATUS",response=True)
+      await client.read_gatt_char(REPLY)
+     self.logger.info("Authenticated GATT COMMAND probe passed")
      if not client.is_connected:raise RuntimeError("BLE disconnected after the first GATT read")
      self.last_status=obj
      self.paired=True
@@ -280,6 +287,9 @@ class App:
       if client.is_connected:await client.disconnect()
      except Exception as cleanup_err:self.logger.warning("BLE cleanup failed: %s",cleanup_err)
      if self.client is client:self.client=None
+     if attempt==1 and ("Unreachable" in str(err) or "GATT" in str(err) or "service" in str(err).lower()):
+      self.logger.warning("Secure GATT validation failed; attempting a single fresh PIN re-pair")
+      await ensure_authenticated_bond(device,pin,self.logger,force=True)
      if attempt==2 or not ("Unreachable" in str(err) or "GATT" in str(err) or "service" in str(err).lower()):
       raise
    raise RuntimeError("Automatic BLE connection/pairing failed")
