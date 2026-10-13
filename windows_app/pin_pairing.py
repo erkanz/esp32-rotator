@@ -32,7 +32,7 @@ def respond_to_pairing_event(args, pin, logger):
     kind = args.pairing_kind
     logger.info("WinRT PairingRequested kind=%s", getattr(kind, "name", str(kind)))
     if kind == DevicePairingKinds.PROVIDE_PIN:
-        args.accept(pin)
+        args.accept_with_pin(pin)
         logger.info("PIN ceremony accepted (PIN not logged)")
         return True
     if kind == DevicePairingKinds.CONFIRM_ONLY:
