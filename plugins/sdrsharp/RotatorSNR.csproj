@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <OutputType>Library</OutputType>
+    <Platforms>AnyCPU</Platforms>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>Zenlabworks.RotatorSNR.SDRSharp</AssemblyName>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../sdr_scan/SDRSharpSnrBridge.cs" Link="SDRSharpSnrBridge.cs" />
+    <Reference Include="SDRSharp.Common">
+      <HintPath>$(SdrSharpSdk)/SDRSharp.Common.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+  <Target Name="VerifySdk" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(SdrSharpSdk)/SDRSharp.Common.dll')" Text="Official SDR# SDK SDRSharp.Common.dll not found; supply SdrSharpSdk path." />
+  </Target>
+</Project>
