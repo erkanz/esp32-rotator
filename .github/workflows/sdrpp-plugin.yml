@@ -17,6 +17,12 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@v4.4.2
+      - name: Check CMake and Visual Studio
+        shell: pwsh
+        run: |
+          cmake --version
+          & "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe" -products * -property installationVersion
       - name: Clone official SDR++ module SDK
         shell: pwsh
         run: |
@@ -45,7 +51,7 @@ jobs:
           $options = [regex]::Matches((Get-Content sdrpp/CMakeLists.txt -Raw), 'option\((OPT_BUILD_[A-Z0-9_]+)')
           $flags = @('-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake')
           foreach ($item in $options) { $flags += "-D$($item.Groups[1].Value)=OFF" }
-          cmake -S sdrpp -B sdrpp/build -G 'Visual Studio 17 2022' -A x64 @flags
+          cmake -S sdrpp -B sdrpp/build -G 'Visual Studio 18 2026' -A x64 @flags
       - name: Compile native SDR++ DLL
         shell: pwsh
         run: cmake --build sdrpp/build --config Release --target zenlab_rotator_snr --parallel 4
