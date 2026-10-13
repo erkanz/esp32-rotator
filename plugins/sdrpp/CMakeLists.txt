@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.13)
+project(zenlab_rotator_snr)
+set(SRC "${CMAKE_CURRENT_LIST_DIR}/main.cpp")
+include(${SDRPP_MODULE_CMAKE})
+target_link_libraries(zenlab_rotator_snr PRIVATE ws2_32)
+target_compile_features(zenlab_rotator_snr PRIVATE cxx_std_17)
