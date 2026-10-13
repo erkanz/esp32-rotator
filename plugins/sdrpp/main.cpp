@@ -1,5 +1,13 @@
 // SDR++ native module: relative spectral SNR for localhost RotatorControl.
 // Uses the official SDR++ ModuleManager + WaterFall FFT API, no IQ Exporter.
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#pragma comment(lib, "ws2_32.lib")
+#endif
 #include <module.h>
 #include <gui/gui.h>
 #include <gui/style.h>
@@ -11,12 +19,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#pragma comment(lib, "ws2_32.lib")
-#endif
-
 SDRPP_MOD_INFO{
     "zenlab_rotator_snr",
     "Relative SNR bridge to RotatorControl (localhost UDP 47291)",
