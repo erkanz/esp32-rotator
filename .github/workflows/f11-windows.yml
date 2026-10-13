@@ -24,7 +24,9 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r windows_app/requirements.txt
       - name: Static check
-        run: python -m py_compile windows_app/rotator_ble.py
+        run: python -m compileall -q windows_app
+      - name: Pairing handler unit tests
+        run: python -m unittest discover -s windows_app -p "test_*.py"
       - name: Build standalone EXE
         working-directory: windows_app
         run: python -m PyInstaller --noconfirm --clean --onefile --windowed --name RotatorBLE --collect-all bleak rotator_ble.py

@@ -100,6 +100,7 @@ class App:
   root.after(120,self.drain_logs)
   self.logger.info("Windows BLE control app launched. Automatic log: %s",self.logfile)
   self.logger.info("Expected BLE service UUID: %s",SERVICE)
+  self.logger.info("Pairing handler v2: PIN + confirmation with mandatory MITM verification")
  def _worker(self):
   asyncio.set_event_loop(self.loop)
   self.loop.set_exception_handler(lambda loop,ctx:self.logger.error("Asyncio failure: %s",ctx.get("message"),exc_info=(type(ctx["exception"]),ctx["exception"],ctx["exception"].__traceback__) if ctx.get("exception") else None))
