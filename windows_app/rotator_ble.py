@@ -12,6 +12,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, scrolledtext
 from bleak import BleakClient, BleakScanner
+from pin_pairing import ensure_authenticated_bond, default_pin, valid_pin
 
 SERVICE="df8268c0-4cc2-4eaa-85dd-3a6159fe0001"
 CMD="df8268c0-4cc2-4eaa-85dd-3a6159fe0002"
@@ -59,7 +60,7 @@ class App:
  def __init__(self,root):
   self.root=root;root.title("Rotator BLE — REMOTE / ROTATOR");root.geometry("560x600")
   self.loop=asyncio.new_event_loop();threading.Thread(target=self._worker,daemon=True).start()
-  self.devices=[];self.client=None;self.running=True;self.jog=0;self.scanning=False
+  self.devices=[];self.device_names=[];self.client=None;self.running=True;self.jog=0;self.scanning=False
   self.events=queue.Queue();self.history=deque(maxlen=4000);self.logger,self.logfile=make_logger(self.events)
   self.gatt_lock=asyncio.Lock();self.jog_token=0;self.last_status=None;self.paired=False;self.connection_generation=0;self.connecting=False
   tabs=ttk.Notebook(root);tabs.pack(fill="both",expand=True,padx=8,pady=8)
@@ -69,8 +70,12 @@ class App:
   self.choice=ttk.Combobox(frame,state="readonly",width=48);self.choice.pack(fill="x",pady=8)
   bar=ttk.Frame(frame);bar.pack()
   ttk.Button(bar,text="Scan",command=lambda:self.call(self.scan())).pack(side="left")
-  ttk.Button(bar,text="Connect",command=lambda:self.call(self.connect(self.choice.current()))).pack(side="left")
+  ttk.Button(bar,text="Connect",command=lambda:self.call(self.connect(self.choice.current(),self.pin.get()))).pack(side="left")
   ttk.Button(bar,text="Disconnect",command=lambda:self.call(self.disconnect())).pack(side="left")
+  self.pin=tk.StringVar(value="")
+  ttk.Label(frame,text="BLE pairing PIN (six digits)").pack()
+  ttk.Entry(frame,textvariable=self.pin,show="*",width=12).pack()
+  self.choice.bind("<<ComboboxSelected>>",lambda e:self.pin.set(default_pin(self.device_names[self.choice.current()]) if 0<=self.choice.current()<len(self.device_names) else ""))
   self.status=tk.StringVar(value="Disconnected");ttk.Label(frame,textvariable=self.status,wraplength=490).pack(pady=10)
   self.az=self.field(frame,"Target AZ 0–359","90")
   bar=ttk.Frame(frame);bar.pack(pady=4)
@@ -187,6 +192,7 @@ class App:
     candidates.append((not match,-int(adv.rssi if adv.rssi is not None else -127),device,name,match))
    candidates.sort(key=lambda item:(item[0],item[1]))
    self.devices=[item[2] for item in candidates]
+   self.device_names=[item[3] for item in candidates]
    for _,_,device,name,match in candidates:
     self.logger.info("SCAN %s name=%r addr=%s", "ROTATOR" if match else "OTHER BLE",name or "(unnamed)",device.address)
    labels=[]
@@ -196,7 +202,9 @@ class App:
    def show():
     self.choice.configure(values=labels)
     self.choice.set("")
-    if labels:self.choice.current(0)
+    if labels:
+     self.choice.current(0)
+     self.pin.set(default_pin(self.device_names[0]))
    self.ui(show)
    matches=sum(item[4] for item in candidates)
    total=len(candidates)
@@ -214,12 +222,13 @@ class App:
    self.set_log(f"Bluetooth scan failed ({type(exc).__name__}): {exc}")
   finally:
    self.scanning=False
- async def connect(self,index):
+ async def connect(self,index,pin):
   if self.connecting:
    self.logger.warning("Duplicate Connect ignored: BLE connection already in progress")
    self.set_log("Connection in progress. Wait for the result.")
    return
   if index<0 or index>=len(self.devices):raise ValueError("Scan and select a BLE device")
+  if not valid_pin(pin):raise ValueError("Enter the six-digit PIN for the selected device")
   self.connecting=True
   device=self.devices[index]
   self.logger.info("Connect requested: name=%r address=%s (automatic secure pairing)",device.name,device.address)
@@ -230,20 +239,21 @@ class App:
    generation=self.connection_generation
    self.last_status=None
    self.paired=False
+   await ensure_authenticated_bond(device,pin,self.logger)
    # A fresh discovery can fail on some WinRT adapters. Cache fallback is
    # sequential, after disconnecting and releasing the previous client.
    for attempt,use_cache in enumerate((True,False),start=1):
     if attempt==2:
      self.logger.warning("First GATT attempt failed. Trying uncached service discovery once.")
      await asyncio.sleep(1.0)
-    self.logger.info("WinRT connect attempt %d/2: auto_pair=True, use_cached_services=%s",attempt,use_cache)
-    client=BleakClient(device,pair=True,timeout=30.0,
+    self.logger.info("WinRT connect attempt %d/2: PIN/MITM verified, use_cached_services=%s",attempt,use_cache)
+    client=BleakClient(device,pair=False,timeout=30.0,
      disconnected_callback=lambda cl,g=generation:self.on_disconnect(cl,g),
      winrt={"use_cached_services":use_cache})
     self.client=client
     try:
      await client.connect()
-     self.logger.info("Auto-pair/connect completed; connected=%s",client.is_connected)
+     self.logger.info("BLE connection completed; connected=%s",client.is_connected)
      if not client.is_connected:raise RuntimeError("Device disconnected while connecting or pairing")
      self.logger.info("Discovered GATT UUIDs: %s",",".join(str(x.uuid) for x in client.services))
      if client.services.get_service(SERVICE) is None:
@@ -255,7 +265,7 @@ class App:
      self.last_status=obj
      self.paired=True
      self.logger.info("BLE session authenticated and ready: role=%s az=%s online=%s",obj.get("role"),obj.get("az"),obj.get("online"))
-     self.set_log("Connected and paired. Motor controls enabled.")
+     self.set_log("Authenticated pairing and status confirmed. Controls enabled.")
      self.ui(lambda d=obj:self.status.set(f"DEVICE {d.get('role')} | LINK {d.get('online')}\nAZ {d.get('az')}° / TARGET {d.get('target')}°"))
      self.call(self.poll(client,generation))
      return
