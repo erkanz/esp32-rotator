@@ -21,7 +21,7 @@ namespace Zenlabworks.RotatorSnr
 
         public string DisplayName => "Zenlabworks Rotator SNR Bridge";
         public bool HasGui => false;
-        public UserControl GuiControl => null;
+        public UserControl Gui => null;
 
         public void Initialize(ISharpControl control)
         {
