@@ -1,0 +1,64 @@
+name: SDRPlusPlus Rotator SNR Plugin DLL
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "plugins/sdrpp/**"
+      - ".github/workflows/sdrpp-plugin.yml"
+permissions:
+  contents: read
+concurrency:
+  group: sdrpp-plugin-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  sdrpp:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clone official SDR++ module SDK
+        shell: pwsh
+        run: |
+          git clone --recursive --depth=1 https://github.com/AlexandreRouma/SDRPlusPlus.git sdrpp
+          cd sdrpp
+          git fetch --depth=1 origin 8c9f5ee8fe405775bfcd62c8c8f8c0fc928a64af
+          git checkout 8c9f5ee8fe405775bfcd62c8c8f8c0fc928a64af
+      - name: Install upstream SDR++ Windows dependency PothosSDR
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -Uri 'https://downloads.myriadrf.org/builds/PothosSDR/PothosSDR-2020.01.26-vc14-x64.exe' -OutFile "$env:RUNNER_TEMP/pothos.exe"
+          New-Item -ItemType Directory -Force -Path 'C:/Program Files/PothosSDR' | Out-Null
+          7z x "$env:RUNNER_TEMP/pothos.exe" '-oC:/Program Files/PothosSDR' -y
+          if (!(Test-Path 'C:/Program Files/PothosSDR/include/volk/volk.h')) { throw "Missing PothosSDR VOLK headers" }
+      - name: Install CMake packages
+        shell: pwsh
+        run: |
+          & 'C:/vcpkg/vcpkg.exe' install fftw3:x64-windows glfw3:x64-windows zstd:x64-windows
+      - name: Enable only the external SNR plugin target
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Content -Path sdrpp/CMakeLists.txt -Value 'add_subdirectory("${CMAKE_SOURCE_DIR}/../plugins/sdrpp" "${CMAKE_BINARY_DIR}/zenlab_rotator_snr")'
+          $options = [regex]::Matches((Get-Content sdrpp/CMakeLists.txt -Raw), 'option\((OPT_BUILD_[A-Z0-9_]+)')
+          $flags = @('-DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake')
+          foreach ($item in $options) { $flags += "-D$($item.Groups[1].Value)=OFF" }
+          cmake -S sdrpp -B sdrpp/build -G 'Visual Studio 17 2022' -A x64 @flags
+      - name: Compile native SDR++ DLL
+        shell: pwsh
+        run: cmake --build sdrpp/build --config Release --target zenlab_rotator_snr --parallel 4
+      - name: Verify native DLL
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem sdrpp/build -Recurse -Filter zenlab_rotator_snr.dll -File | Select-Object -First 1
+          if (!$dll) { throw 'SDR++ module DLL not found' }
+          Copy-Item $dll.FullName plugins/sdrpp/zenlab_rotator_snr.dll
+          Get-Item plugins/sdrpp/zenlab_rotator_snr.dll | Select-Object Name,Length
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SDRPlusPlus-RotatorSNR-Plugin-DLL
+          path: plugins/sdrpp/zenlab_rotator_snr.dll
+          if-no-files-found: error
+          retention-days: 14
